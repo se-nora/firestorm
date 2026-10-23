@@ -129,6 +129,11 @@ public:
     bool            loadScriptText(const std::string& filename);
     bool            writeToFile(const std::string& filename, bool unprocessed);
     void            sync();
+    std::string     getExternalFilePath() const;
+    LLSD            getCompileSourceMap() const { return mCompileSourceMap; }
+    bool            isCompileSourceMapComplete() const { return mCompileSourceMapComplete; }
+    void            setCompileSourceMap(const LLSD& source_map, bool complete)
+                    { mCompileSourceMap = source_map; mCompileSourceMapComplete = complete; }
 
     // <FS:Ansariel> FIRE-7514: Script in external editor needs to be saved twice
     //void          doSave( bool close_after_save );
@@ -219,6 +224,8 @@ protected:
 
     bool            mLive;
     bool            mCompiling; // <FS:Kadah> Compile indicators
+    LLSD            mCompileSourceMap;
+    bool            mCompileSourceMapComplete = false;
 
 private:
     std::string     mSampleText;
