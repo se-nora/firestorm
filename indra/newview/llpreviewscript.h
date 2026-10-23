@@ -129,6 +129,7 @@ public:
     bool            loadScriptText(const std::string& filename);
     bool            writeToFile(const std::string& filename, bool unprocessed);
     void            sync();
+    std::string     getExternalFilePath() const;
 
     // <FS:Ansariel> FIRE-7514: Script in external editor needs to be saved twice
     //void          doSave( bool close_after_save );

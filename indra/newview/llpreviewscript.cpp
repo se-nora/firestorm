@@ -88,6 +88,7 @@
 #include "llexperiencecache.h"
 #include "llfloaterexperienceprofile.h"
 #include "llviewerassetupload.h"
+#include "llcorehttputil.h"
 //#include "lltoggleablemenu.h" // <FS:Ansariel> FIRE-20818: User-selectable font and size for script editor
 //#include "llmenubutton.h" // <FS:Ansariel> FIRE-20818: User-selectable font and size for script editor
 #include "llinventoryfunctions.h"
@@ -133,6 +134,21 @@ static bool have_script_upload_cap(LLUUID& object_id)
 {
     LLViewerObject* object = gObjectList.findObject(object_id);
     return object && (! object->getRegion()->getCapability("UpdateScriptTask").empty());
+}
+
+static void sendCompileResultToVSCode(const std::string& file_path, bool success, const LLSD& errors)
+{
+    if (file_path.empty())
+    {
+        return;
+    }
+
+    LLSD result;
+    result["file"] = file_path;
+    result["success"] = success;
+    result["errors"] = errors;
+    LLCoreHttpUtil::HttpCoroutineAdapter::callbackHttpPost(
+        "http://127.0.0.1:39097/compile", result);
 }
 
 // [SL:KB] - Patch: Build-ScriptRecover | Checked: 2011-11-23 (Catznip-3.2.0) | Added: Catznip-3.2.0
@@ -1165,6 +1181,11 @@ void LLScriptEdCore::sync()
             writeToFile(tmp_file, gSavedSettings.getBOOL("_NACL_LSLPreprocessor"));
         }
     }
+}
+
+std::string LLScriptEdCore::getExternalFilePath() const
+{
+    return mLiveFile ? mLiveFile->filename() : std::string();
 }
 
 bool LLScriptEdCore::hasChanged() const
@@ -2322,6 +2343,7 @@ void LLPreviewLSL::callbackLSLCompileSucceeded()
     mScriptEd->mErrorList->addCommentText(LLTrans::getString("SaveComplete"));
     // </FS>
 
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), true, LLSD::emptyArray());
     mScriptEd->updateIndicators(false, true); //<FS:Kadah> Compile Indicators
 
 // [SL:KB] - Patch: Build-ScriptRecover | Checked: 2011-11-23 (Catznip-3.2.0) | Added: Catznip-3.2.0
@@ -2352,6 +2374,7 @@ void LLPreviewLSL::callbackLSLCompileFailed(const LLSD& compile_errors)
         row["columns"][0]["font"] = "OCRA";
         mScriptEd->mErrorList->addElement(row);
     }
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors);
     mScriptEd->selectFirstError();
 
     mScriptEd->updateIndicators(false, false); //<FS:Kadah> Compile Indicators
@@ -2773,6 +2796,7 @@ void LLLiveLSLEditor::callbackLSLCompileSucceeded(const LLUUID& task_id,
     mScriptEd->mErrorList->addCommentText(LLTrans::getString("SaveComplete"));
     // </FS>
 
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), true, LLSD::emptyArray());
     mScriptEd->updateIndicators(false, true); //<FS:Kadah> Compile Indicators
 
 // [SL:KB] - Patch: Build-ScriptRecover | Checked: 2011-11-23 (Catznip-3.2.0) | Added: Catznip-3.2.0
@@ -2805,6 +2829,7 @@ void LLLiveLSLEditor::callbackLSLCompileFailed(const LLSD& compile_errors)
         row["columns"][0]["font"] = "OCRA";
         mScriptEd->mErrorList->addElement(row);
     }
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors);
     mScriptEd->selectFirstError();
 
     mScriptEd->updateIndicators(false, false); //<FS:Kadah> Compile Indicators
