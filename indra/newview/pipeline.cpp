@@ -3100,6 +3100,24 @@ void LLPipeline::markMoved(LLDrawable *drawablep, bool damped_motion)
         return;
     }
 
+    if (damped_motion)
+    {
+        for (LLDrawable* parentp = drawablep->getParent(); parentp; parentp = parentp->getParent())
+        {
+            LLViewerObject* parent_vobj = parentp->getVObj();
+            if (parent_vobj && parent_vobj->flagUsePhysics() &&
+                (!parent_vobj->getVelocity().isExactlyZero() ||
+                    !parent_vobj->getAcceleration().isExactlyZero() ||
+                    !parent_vobj->getAngularVelocity().isExactlyZero() ||
+                    parent_vobj->isChanged(LLXform::MOVED)))
+            {
+                // Keep a moving physical linkset's transforms in sync.
+                damped_motion = false;
+                break;
+            }
+        }
+    }
+
     if (drawablep->getParent())
     {
         //ensure that parent drawables are moved first
