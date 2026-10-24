@@ -648,7 +648,10 @@ F32 LLDrawable::updateXform(bool undamped)
     if (damped && isVisible())
     {
         F32 lerp_amt = llclamp(LLSmoothInterpolation::getInterpolant(OBJECT_DAMPING_TIME_CONSTANT), 0.f, 1.f);
-        LLVector3 new_pos = lerp(old_pos, target_pos, lerp_amt);
+        // A child rotation update should not damp its position relative to the parent.
+        LLVector3 new_pos = isRoot() || mVObjp->isChanged(LLXform::TRANSLATED)
+            ? lerp(old_pos, target_pos, lerp_amt)
+            : target_pos;
         dist_squared = dist_vec_squared(new_pos, target_pos);
 
         LLQuaternion new_rot = nlerp(lerp_amt, old_rot, target_rot);
