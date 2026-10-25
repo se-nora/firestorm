@@ -136,7 +136,8 @@ static bool have_script_upload_cap(LLUUID& object_id)
     return object && (! object->getRegion()->getCapability("UpdateScriptTask").empty());
 }
 
-static void sendCompileResultToVSCode(const std::string& file_path, bool success, const LLSD& errors)
+static void sendCompileResultToVSCode(const std::string& file_path, bool success, const LLSD& errors,
+                                      const LLSD& source_map = LLSD(), bool source_map_complete = false)
 {
     if (file_path.empty())
     {
@@ -147,6 +148,11 @@ static void sendCompileResultToVSCode(const std::string& file_path, bool success
     result["file"] = file_path;
     result["success"] = success;
     result["errors"] = errors;
+    if (!source_map.isUndefined())
+    {
+        result["source_map"] = source_map;
+        result["source_map_complete"] = source_map_complete;
+    }
     LLCoreHttpUtil::HttpCoroutineAdapter::callbackHttpPost(
         "http://127.0.0.1:39097/compile", result);
 }
@@ -1600,6 +1606,7 @@ void LLScriptEdCore::doSave(bool close_after_save, bool sync /*= true*/)
     }
     else
     {
+        setCompileSourceMap(LLSD(), false);
         if( mSaveCallback )
         {
             mSaveCallback( mUserdata, close_after_save, sync );
@@ -2374,7 +2381,8 @@ void LLPreviewLSL::callbackLSLCompileFailed(const LLSD& compile_errors)
         row["columns"][0]["font"] = "OCRA";
         mScriptEd->mErrorList->addElement(row);
     }
-    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors);
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors,
+                              mScriptEd->getCompileSourceMap(), mScriptEd->isCompileSourceMapComplete());
     mScriptEd->selectFirstError();
 
     mScriptEd->updateIndicators(false, false); //<FS:Kadah> Compile Indicators
@@ -2829,7 +2837,8 @@ void LLLiveLSLEditor::callbackLSLCompileFailed(const LLSD& compile_errors)
         row["columns"][0]["font"] = "OCRA";
         mScriptEd->mErrorList->addElement(row);
     }
-    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors);
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors,
+                              mScriptEd->getCompileSourceMap(), mScriptEd->isCompileSourceMapComplete());
     mScriptEd->selectFirstError();
 
     mScriptEd->updateIndicators(false, false); //<FS:Kadah> Compile Indicators

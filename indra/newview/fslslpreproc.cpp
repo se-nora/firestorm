@@ -549,6 +549,23 @@ public:
         mFileStack.push(proc->mMainScriptName);
     }
 
+    std::string get_include_path(const std::string& source_file) const
+    {
+        const boost::filesystem::path source_path(source_file);
+        if (source_path.is_absolute())
+        {
+            return source_file;
+        }
+
+        std::map<std::string, std::string>::const_iterator path = mIncludePaths.find(source_file);
+        if (path == mIncludePaths.end() && mAmbiguousIncludeNames.find(source_file) == mAmbiguousIncludeNames.end())
+        {
+            const std::string filename = source_path.filename().string();
+            path = mIncludePaths.find(filename);
+        }
+        return path == mIncludePaths.end() ? source_file : path->second;
+    }
+
     template <typename ContextT>
     bool found_include_directive(ContextT const& ctx, std::string const &filename, bool include_next)
     {
@@ -619,6 +636,15 @@ public:
         bool is_system_include)
     {
         ContextT& usefulctx = const_cast<ContextT&>(ctx);
+        boost::filesystem::path include_path(absname);
+        if (!include_path.is_absolute())
+        {
+            include_path = boost::filesystem::absolute(include_path);
+        }
+        const std::string full_include_path = include_path.string();
+        register_include_path(relname, full_include_path);
+        register_include_path(shortfile(relname), full_include_path);
+
         std::string id;
         std::string filename = shortfile(relname);
         std::map<std::string, LLUUID>::iterator it = mProc->cached_assetids.find(filename);
@@ -684,9 +710,30 @@ public:
     }
 
 private:
+    void register_include_path(const std::string& name, const std::string& full_path)
+    {
+        if (mAmbiguousIncludeNames.find(name) != mAmbiguousIncludeNames.end())
+        {
+            return;
+        }
+
+        std::map<std::string, std::string>::iterator path = mIncludePaths.find(name);
+        if (path == mIncludePaths.end())
+        {
+            mIncludePaths[name] = full_path;
+        }
+        else if (path->second != full_path)
+        {
+            mIncludePaths.erase(path);
+            mAmbiguousIncludeNames.insert(name);
+        }
+    }
+
     FSLSLPreprocessor* mProc;
     std::stack<std::string> mAssetStack;
     std::stack<std::string> mFileStack;
+    std::map<std::string, std::string> mIncludePaths;
+    std::set<std::string> mAmbiguousIncludeNames;
 };
 
 void cache_script(std::string name, std::string content)
@@ -1124,6 +1171,10 @@ void FSLSLPreprocessor::start_process()
     }
 
     mWaving = true;
+    if (!mStandalone)
+    {
+        mCore->setCompileSourceMap(LLSD(), false);
+    }
     bool lackDefault = false;
     boost::wave::util::file_position_type current_position;
     std::string input;
@@ -1260,6 +1311,10 @@ void FSLSLPreprocessor::start_process()
     bool enable_hdd_include = gSavedSettings.getBOOL("_NACL_PreProcEnableHDDInclude");
     bool use_compression = gSavedSettings.getBOOL("_NACL_PreProcLSLTextCompress");
     bool errored = false;
+    LLSD source_map = LLSD::emptyArray();
+    std::map<S32, S32> mapped_generated_lines;
+    S32 generated_line = 1;
+    bool transformed_source_map_complete = true;
     if (preprocessor_enabled)
     {
         std::string settings;
@@ -1341,6 +1396,44 @@ void FSLSLPreprocessor::start_process()
             context_type::iterator_type first = ctx.begin();
             context_type::iterator_type last = ctx.end();
 
+            auto record_source_line = [&](S32 generated_line, const std::string& source_file,
+                                          S32 source_line, bool prefer_location)
+            {
+                auto mapped_line = mapped_generated_lines.find(generated_line);
+                if (mapped_line != mapped_generated_lines.end() && !prefer_location)
+                {
+                    return;
+                }
+
+                std::string source_name = source_file;
+                const boost::filesystem::path source_path(source_file);
+                const std::string main_name = boost::filesystem::path(name).filename().string();
+                if (source_file == name ||
+                    (source_path.parent_path().empty() && source_path.filename().string() == main_name))
+                {
+                    const std::string external_path = mStandalone ? std::string() : mCore->getExternalFilePath();
+                    source_name = external_path.empty() ? name : external_path;
+                }
+                else
+                {
+                    source_name = tracer.get_include_path(source_file);
+                }
+
+                LLSD location;
+                location["generated_line"] = generated_line;
+                location["source_file"] = source_name;
+                location["source_line"] = source_line;
+                if (mapped_line == mapped_generated_lines.end())
+                {
+                    mapped_generated_lines[generated_line] = static_cast<S32>(source_map.size());
+                    source_map.append(location);
+                }
+                else
+                {
+                    source_map[mapped_line->second] = location;
+                }
+            };
+
             while (first != last)
             {
                 if (caching_files.size() != 0)
@@ -1357,6 +1450,18 @@ void FSLSLPreprocessor::start_process()
                     token = "//#line";
                 }
 
+                std::string source_file = current_position.get_file().c_str();
+                S32 source_line = static_cast<S32>(current_position.get_line());
+                for (char character : token)
+                {
+                    record_source_line(generated_line, source_file, source_line, character != '\n');
+                    if (character == '\n')
+                    {
+                        ++generated_line;
+                        ++source_line;
+                        record_source_line(generated_line, source_file, source_line, false);
+                    }
+                }
                 output += token;
 
                 if (!lazy_lists)
@@ -1549,11 +1654,90 @@ void FSLSLPreprocessor::start_process()
 
         if (preprocessor_enabled)
         {
-            output = encode(rinput) + "\n\n" + output;
+            LLSD transformed_source_map = LLSD::emptyArray();
+            std::istringstream output_lines(output);
+            std::string output_line;
+            S32 generated_line = 0;
+            S32 source_line = 0;
+            std::string source_file;
+            bool has_source_location = false;
+            bool all_lines_mapped = true;
+            const boost::regex line_directive("^\\s*//\\s*#line\\s+([0-9]+)\\s+\"([^\"]+)\"\\s*$");
+            const std::string main_name = boost::filesystem::path(name).filename().string();
+            while (std::getline(output_lines, output_line))
+            {
+                ++generated_line;
+
+                boost::smatch directive;
+                if (boost::regex_match(output_line, directive, line_directive))
+                {
+                    std::stringstream line_stream(directive[1]);
+                    line_stream >> source_line;
+                    source_file = directive[2];
+                    for (std::string::size_type character = 0; character + 1 < source_file.size(); ++character)
+                    {
+                        if (source_file[character] == '\\' && source_file[character + 1] == '\\')
+                        {
+                            source_file.erase(character, 1);
+                        }
+                    }
+
+                    const boost::filesystem::path source_path(source_file);
+                    if (source_path.filename().string() == main_name)
+                    {
+                        const std::string external_path = mStandalone ? std::string() : mCore->getExternalFilePath();
+                        source_file = external_path.empty() ? name : external_path;
+                    }
+                    else if (!source_path.is_absolute())
+                    {
+                        source_file = source_path.string();
+                    }
+                    has_source_location = true;
+                    continue;
+                }
+
+                const std::string::size_type first = output_line.find_first_not_of(" \t\r\n");
+                if (!has_source_location)
+                {
+                    if (first != std::string::npos)
+                    {
+                        all_lines_mapped = false;
+                    }
+                    continue;
+                }
+
+                LLSD location;
+                location["generated_line"] = generated_line;
+                location["source_file"] = source_file;
+                location["source_line"] = source_line++;
+                transformed_source_map.append(location);
+            }
+            source_map = transformed_source_map;
+            transformed_source_map_complete = all_lines_mapped;
+        }
+
+        std::string output_prefix;
+        if (preprocessor_enabled)
+        {
+            output_prefix = encode(rinput) + "\n\n";
+            output = output_prefix + output;
         }
         else
         {
             output = rinput;
+            const std::string source_name = mStandalone || mCore->getExternalFilePath().empty()
+                ? name : mCore->getExternalFilePath();
+            std::istringstream source_lines(rinput);
+            std::string source_line;
+            S32 line_number = 0;
+            while (std::getline(source_lines, source_line))
+            {
+                LLSD location;
+                location["generated_line"] = ++line_number;
+                location["source_file"] = source_name;
+                location["source_line"] = line_number;
+                source_map.append(location);
+            }
         }
 
         if (mStandalone)
@@ -1562,6 +1746,23 @@ void FSLSLPreprocessor::start_process()
         }
         else
         {
+            bool source_map_complete = !errored &&
+                (!preprocessor_enabled ||
+                 (!lazy_lists && !use_switch &&
+                  (mDefinitionCaching || (!use_optimizer && !use_compression)))) &&
+                transformed_source_map_complete;
+            if (preprocessor_enabled)
+            {
+                const S32 prefix_lines = static_cast<S32>(
+                    std::count(output_prefix.begin(), output_prefix.end(), '\n'));
+                for (LLSD::array_iterator location = source_map.beginArray();
+                     location != source_map.endArray(); ++location)
+                {
+                    (*location)["generated_line"] = (*location)["generated_line"].asInteger() + prefix_lines;
+                }
+            }
+            mCore->setCompileSourceMap(source_map, source_map_complete);
+
             FSLSLPreProcViewer* outfield = mCore->mPostEditor;
             if (outfield)
             {
