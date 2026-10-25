@@ -1408,8 +1408,8 @@ void FSLSLPreprocessor::start_process()
                 std::string source_name = source_file;
                 const boost::filesystem::path source_path(source_file);
                 const std::string main_name = boost::filesystem::path(name).filename().string();
-                if (source_file == name ||
-                    (source_path.parent_path().empty() && source_path.filename().string() == main_name))
+                const bool is_main_source = source_path.filename().string() == main_name;
+                if (is_main_source)
                 {
                     const std::string external_path = mStandalone ? std::string() : mCore->getExternalFilePath();
                     source_name = external_path.empty() ? name : external_path;
@@ -1423,6 +1423,7 @@ void FSLSLPreprocessor::start_process()
                 location["generated_line"] = generated_line;
                 location["source_file"] = source_name;
                 location["source_line"] = source_line;
+                location["is_main_source"] = is_main_source;
                 if (mapped_line == mapped_generated_lines.end())
                 {
                     mapped_generated_lines[generated_line] = static_cast<S32>(source_map.size());
@@ -1451,7 +1452,7 @@ void FSLSLPreprocessor::start_process()
                 }
 
                 std::string source_file = current_position.get_file().c_str();
-                S32 source_line = static_cast<S32>(current_position.get_line());
+                S32 source_line = static_cast<S32>(current_position.get_line()) + 1;
                 for (char character : token)
                 {
                     record_source_line(generated_line, source_file, source_line, character != '\n');
@@ -1527,6 +1528,7 @@ void FSLSLPreprocessor::start_process()
         }
     }
 
+    const std::string wave_output = output;
     if (preprocessor_enabled && !errored)
     {
         FAILDEBUG
@@ -1658,12 +1660,48 @@ void FSLSLPreprocessor::start_process()
             std::istringstream output_lines(output);
             std::string output_line;
             S32 generated_line = 0;
-            S32 source_line = 0;
-            std::string source_file;
+            S32 source_line = 1;
+            const std::string external_path = mStandalone ? std::string() : mCore->getExternalFilePath();
+            std::string source_file = external_path.empty() ? name : external_path;
+            bool is_main_source = true;
             bool has_source_location = false;
             bool all_lines_mapped = true;
+            bool initial_location_found = false;
             const boost::regex line_directive("^\\s*//\\s*#line\\s+([0-9]+)\\s+\"([^\"]+)\"\\s*$");
             const std::string main_name = boost::filesystem::path(name).filename().string();
+
+            std::istringstream wave_lines(wave_output);
+            std::string wave_line;
+            S32 wave_line_number = 0;
+            while (std::getline(wave_lines, wave_line))
+            {
+                ++wave_line_number;
+                const std::string::size_type first = wave_line.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos ||
+                    boost::regex_match(wave_line, line_directive))
+                {
+                    continue;
+                }
+
+                for (LLSD::array_const_iterator location = source_map.beginArray();
+                     location != source_map.endArray(); ++location)
+                {
+                    if ((*location)["generated_line"].asInteger() == wave_line_number)
+                    {
+                        source_file = (*location)["source_file"].asString();
+                        source_line = (*location)["source_line"].asInteger();
+                        is_main_source = (*location)["is_main_source"].asBoolean();
+                        initial_location_found = true;
+                        break;
+                    }
+                }
+                break;
+            }
+            if (!initial_location_found)
+            {
+                all_lines_mapped = false;
+            }
+
             while (std::getline(output_lines, output_line))
             {
                 ++generated_line;
@@ -1687,10 +1725,16 @@ void FSLSLPreprocessor::start_process()
                     {
                         const std::string external_path = mStandalone ? std::string() : mCore->getExternalFilePath();
                         source_file = external_path.empty() ? name : external_path;
+                        is_main_source = true;
                     }
                     else if (!source_path.is_absolute())
                     {
                         source_file = source_path.string();
+                        is_main_source = false;
+                    }
+                    else
+                    {
+                        is_main_source = false;
                     }
                     has_source_location = true;
                     continue;
@@ -1701,15 +1745,19 @@ void FSLSLPreprocessor::start_process()
                 {
                     if (first != std::string::npos)
                     {
-                        all_lines_mapped = false;
+                        has_source_location = true;
                     }
-                    continue;
+                    else
+                    {
+                        continue;
+                    }
                 }
 
                 LLSD location;
                 location["generated_line"] = generated_line;
                 location["source_file"] = source_file;
                 location["source_line"] = source_line++;
+                location["is_main_source"] = is_main_source;
                 transformed_source_map.append(location);
             }
             source_map = transformed_source_map;
@@ -1736,6 +1784,7 @@ void FSLSLPreprocessor::start_process()
                 location["generated_line"] = ++line_number;
                 location["source_file"] = source_name;
                 location["source_line"] = line_number;
+                location["is_main_source"] = true;
                 source_map.append(location);
             }
         }

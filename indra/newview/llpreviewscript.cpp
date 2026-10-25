@@ -29,6 +29,7 @@
 #include "llpreviewscript.h"
 
 #include <cstdlib>
+#include <boost/filesystem.hpp>
 #include <boost/regex.hpp>
 
 #include "llassetstorage.h"
@@ -139,7 +140,8 @@ static bool have_script_upload_cap(LLUUID& object_id)
     return object && (! object->getRegion()->getCapability("UpdateScriptTask").empty());
 }
 
-static LLSD createMappedCompileErrors(const LLSD& errors, const LLSD& source_map)
+static LLSD createMappedCompileErrors(const LLSD& errors, const LLSD& source_map,
+                                      const std::string& main_script_path)
 {
     LLSD mapped_errors = LLSD::emptyArray();
     const boost::regex diagnostic_pattern(
@@ -177,7 +179,8 @@ static LLSD createMappedCompileErrors(const LLSD& errors, const LLSD& source_map
             }
 
             LLSD mapped_error;
-            mapped_error["file"] = source_file;
+            mapped_error["file"] = (*location)["is_main_source"].asBoolean()
+                ? main_script_path : source_file;
             mapped_error["message"] = llformat("(%d, %d) : %s",
                 source_line, column, diagnostic[3].str().c_str());
             mapped_errors.append(mapped_error);
@@ -188,8 +191,37 @@ static LLSD createMappedCompileErrors(const LLSD& errors, const LLSD& source_map
     return mapped_errors;
 }
 
+static std::string savePreprocessedScript(LLScriptEdCore* script_editor)
+{
+    const std::string source_path = script_editor->getExternalFilePath();
+    if (source_path.empty() || !gSavedSettings.getBOOL("_NACL_LSLPreprocessor"))
+    {
+        return std::string();
+    }
+
+    boost::filesystem::path preprocessed_path(source_path);
+    if (preprocessed_path.extension() == ".lsl")
+    {
+        preprocessed_path.replace_extension(".preprocessed.lsl");
+    }
+    else
+    {
+        preprocessed_path += ".preprocessed.lsl";
+    }
+
+    const std::string output_path = preprocessed_path.string();
+    if (!script_editor->writeToFile(output_path, false))
+    {
+        LL_WARNS("ScriptEditor") << "Unable to save preprocessed script to " << output_path << LL_ENDL;
+        return std::string();
+    }
+
+    return output_path;
+}
+
 static void sendCompileResultToVSCode(const std::string& file_path, bool success, const LLSD& errors,
-                                      const LLSD& mapped_errors = LLSD())
+                                      const LLSD& mapped_errors = LLSD(),
+                                      const std::string& diagnostic_file = std::string())
 {
     if (file_path.empty())
     {
@@ -203,6 +235,10 @@ static void sendCompileResultToVSCode(const std::string& file_path, bool success
     if (!mapped_errors.isUndefined())
     {
         result["mapped_errors"] = mapped_errors;
+    }
+    if (!diagnostic_file.empty())
+    {
+        result["diagnostic_file"] = diagnostic_file;
     }
     LLCoreHttpUtil::HttpCoroutineAdapter::callbackHttpPost(
         "http://127.0.0.1:39097/compile", result);
@@ -2401,7 +2437,9 @@ void LLPreviewLSL::callbackLSLCompileSucceeded()
     mScriptEd->mErrorList->addCommentText(LLTrans::getString("SaveComplete"));
     // </FS>
 
-    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), true, LLSD::emptyArray());
+    const std::string diagnostic_file = savePreprocessedScript(mScriptEd);
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), true, LLSD::emptyArray(),
+                              LLSD::emptyArray(), diagnostic_file);
     mScriptEd->updateIndicators(false, true); //<FS:Kadah> Compile Indicators
 
 // [SL:KB] - Patch: Build-ScriptRecover | Checked: 2011-11-23 (Catznip-3.2.0) | Added: Catznip-3.2.0
@@ -2432,8 +2470,12 @@ void LLPreviewLSL::callbackLSLCompileFailed(const LLSD& compile_errors)
         row["columns"][0]["font"] = "OCRA";
         mScriptEd->mErrorList->addElement(row);
     }
+
+    const std::string diagnostic_file = savePreprocessedScript(mScriptEd);
     sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors,
-                              createMappedCompileErrors(compile_errors, mScriptEd->getCompileSourceMap()));
+                              createMappedCompileErrors(compile_errors, mScriptEd->getCompileSourceMap(),
+                                                        mScriptEd->getExternalFilePath()),
+                              diagnostic_file);
     mScriptEd->selectFirstError();
 
     mScriptEd->updateIndicators(false, false); //<FS:Kadah> Compile Indicators
@@ -2855,7 +2897,9 @@ void LLLiveLSLEditor::callbackLSLCompileSucceeded(const LLUUID& task_id,
     mScriptEd->mErrorList->addCommentText(LLTrans::getString("SaveComplete"));
     // </FS>
 
-    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), true, LLSD::emptyArray());
+    const std::string diagnostic_file = savePreprocessedScript(mScriptEd);
+    sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), true, LLSD::emptyArray(),
+                              LLSD::emptyArray(), diagnostic_file);
     mScriptEd->updateIndicators(false, true); //<FS:Kadah> Compile Indicators
 
 // [SL:KB] - Patch: Build-ScriptRecover | Checked: 2011-11-23 (Catznip-3.2.0) | Added: Catznip-3.2.0
@@ -2888,8 +2932,11 @@ void LLLiveLSLEditor::callbackLSLCompileFailed(const LLSD& compile_errors)
         row["columns"][0]["font"] = "OCRA";
         mScriptEd->mErrorList->addElement(row);
     }
+    const std::string diagnostic_file = savePreprocessedScript(mScriptEd);
     sendCompileResultToVSCode(mScriptEd->getExternalFilePath(), false, compile_errors,
-                              createMappedCompileErrors(compile_errors, mScriptEd->getCompileSourceMap()));
+                              createMappedCompileErrors(compile_errors, mScriptEd->getCompileSourceMap(),
+                                                        mScriptEd->getExternalFilePath()),
+                              diagnostic_file);
     mScriptEd->selectFirstError();
 
     mScriptEd->updateIndicators(false, false); //<FS:Kadah> Compile Indicators
